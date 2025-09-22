@@ -1,9 +1,10 @@
 'use client';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { projects, samples, alerts, calculateHMPI, getRiskLevel } from '@/utils/data';
+import { fetchProjects, fetchSamples, fetchAlerts, calculateHMPI, getRiskLevel } from '@/utils/supabase-helpers';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Progress } from '@/components/ui/progress';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { 
   BarChart, 
   Bar, 
@@ -22,23 +23,83 @@ import {
   AlertTriangle,
   TrendingUp,
   MapPin,
-  Activity
+  Activity,
+  Loader2
 } from 'lucide-react';
+
+interface DashboardData {
+  projects: any[];
+  samples: any[];
+  alerts: any[];
+}
 
 export default function DashboardPage() {
   const { user } = useAuth();
+  const [data, setData] = useState<DashboardData>({ projects: [], samples: [], alerts: [] });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, []);
+
+  const loadDashboardData = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      const [projects, samples, alerts] = await Promise.all([
+        fetchProjects(),
+        fetchSamples(),
+        fetchAlerts()
+      ]);
+      
+      setData({ projects, samples, alerts });
+    } catch (err) {
+      console.error('Error loading dashboard data:', err);
+      setError('Failed to load dashboard data. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="p-6 flex items-center justify-center min-h-96">
+        <div className="text-center">
+          <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4" />
+          <p className="text-gray-600">Loading dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-6">
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
 
   // Calculate statistics
-  const totalProjects = projects.length;
-  const totalSamples = samples.length;
-  const totalAlerts = alerts.filter(a => !a.acknowledged).length;
+  const totalProjects = data.projects.length;
+  const totalSamples = data.samples.length;
+  const totalAlerts = data.alerts.filter(a => !a.acknowledged).length;
   
   // Calculate HMPI for all samples
-  const samplesWithHMPI = samples.map(sample => ({
+  const samplesWithHMPI = data.samples.map(sample => ({
     ...sample,
-    hmpi: calculateHMPI(sample),
-    riskLevel: getRiskLevel(calculateHMPI(sample))
+    hmpi: calculateHMPI(sample.si || 0, sample.ii || 1, sample.mi || 1),
+    riskLevel: getRiskLevel(calculateHMPI(sample.si || 0, sample.ii || 1, sample.mi || 1))
   }));
+
+  const averageHMPI = samplesWithHMPI.length > 0 
+    ? samplesWithHMPI.reduce((sum, s) => sum + s.hmpi, 0) / samplesWithHMPI.length 
+    : 0;
 
   // Risk distribution
   const riskDistribution = samplesWithHMPI.reduce((acc, sample) => {
@@ -54,19 +115,27 @@ export default function DashboardPage() {
   }));
 
   // Project-wise sample distribution
-  const projectDistribution = projects.map(project => ({
-    name: project.name.split(' - ')[1] || project.name,
-    samples: samples.filter(s => s.projectId === project.id).length,
-    alerts: alerts.filter(a => a.projectId === project.id && !a.acknowledged).length
+  const projectDistribution = data.projects.map(project => ({
+    name: project.name.length > 20 ? project.name.substring(0, 20) + '...' : project.name,
+    samples: data.samples.filter(s => s.project_id === project.project_id).length,
+    alerts: data.alerts.filter(a => a.project_id === project.project_id && !a.acknowledged).length
   }));
 
-  // Recent activities (mock data)
+  // Recent activities
   const recentActivities = [
-    { id: 1, action: 'New sample added', project: 'Ganga Study', time: '2 hours ago' },
-    { id: 2, action: 'Alert generated', project: 'Yamuna Study', time: '5 hours ago' },
-    { id: 3, action: 'Report generated', project: 'Cauvery Study', time: '1 day ago' },
-    { id: 4, action: 'HMPI calculated', project: 'Narmada Study', time: '2 days ago' },
-  ];
+    ...data.samples.slice(0, 2).map(sample => ({
+      id: sample.id,
+      action: 'New sample added',
+      project: data.projects.find(p => p.project_id === sample.project_id)?.name || 'Unknown Project',
+      time: new Date(sample.created_at).toLocaleDateString()
+    })),
+    ...data.alerts.slice(0, 2).map(alert => ({
+      id: alert.id,
+      action: 'Alert generated',
+      project: data.projects.find(p => p.project_id === alert.project_id)?.name || 'Unknown Project',
+      time: new Date(alert.created_at).toLocaleDateString()
+    }))
+  ].slice(0, 4);
 
   const getRoleSpecificContent = () => {
     switch (user?.role) {
@@ -148,9 +217,7 @@ export default function DashboardPage() {
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">
-              {(samplesWithHMPI.reduce((sum, s) => sum + s.hmpi, 0) / samplesWithHMPI.length).toFixed(1)}
-            </div>
+            <div className="text-2xl font-bold">{averageHMPI.toFixed(1)}</div>
             <p className="text-xs text-muted-foreground">Pollution index level</p>
           </CardContent>
         </Card>
@@ -164,16 +231,22 @@ export default function DashboardPage() {
             <CardDescription>Number of samples per project location</CardDescription>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={projectDistribution}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="samples" fill="#3B82F6" />
-                <Bar dataKey="alerts" fill="#EF4444" />
-              </BarChart>
-            </ResponsiveContainer>
+            {projectDistribution.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={projectDistribution}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="samples" fill="#3B82F6" name="Samples" />
+                  <Bar dataKey="alerts" fill="#EF4444" name="Alerts" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-300 flex items-center justify-center text-gray-500">
+                No project data available
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -184,25 +257,31 @@ export default function DashboardPage() {
             <CardDescription>Sample classification by pollution risk</CardDescription>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <PieChart>
-                <Pie
-                  data={riskChartData}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                  outerRadius={80}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {riskChartData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip />
-              </PieChart>
-            </ResponsiveContainer>
+            {riskChartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie
+                    data={riskChartData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {riskChartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-300 flex items-center justify-center text-gray-500">
+                No risk data available
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -215,11 +294,11 @@ export default function DashboardPage() {
             <CardDescription>Latest water quality monitoring projects</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {projects.slice(0, 4).map((project) => {
-              const projectSamples = samples.filter(s => s.projectId === project.id);
-              const projectAlerts = alerts.filter(a => a.projectId === project.id && !a.acknowledged);
+            {data.projects.slice(0, 4).map((project) => {
+              const projectSamples = data.samples.filter(s => s.project_id === project.project_id);
+              const projectAlerts = data.alerts.filter(a => a.project_id === project.project_id && !a.acknowledged);
               const avgHMPI = projectSamples.length > 0 
-                ? projectSamples.reduce((sum, s) => sum + calculateHMPI(s), 0) / projectSamples.length 
+                ? projectSamples.reduce((sum, s) => sum + calculateHMPI(s.si || 0, s.ii || 1, s.mi || 1), 0) / projectSamples.length 
                 : 0;
 
               return (
@@ -240,7 +319,9 @@ export default function DashboardPage() {
                   </div>
                   <div className="text-right">
                     <div className="text-sm font-medium">HMPI: {avgHMPI.toFixed(1)}</div>
-                    <div className="text-xs text-gray-500">{project.createdAt}</div>
+                    <div className="text-xs text-gray-500">
+                      {new Date(project.created_at).toLocaleDateString()}
+                    </div>
                   </div>
                 </div>
               );

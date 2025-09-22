@@ -1,12 +1,13 @@
 'use client';
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import { projects, samples, calculateHMPI, getRiskLevel } from '@/utils/data';
+import { fetchProjects, fetchSamples, calculateHMPI, getRiskLevel } from '@/utils/supabase-helpers';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { MapPin, Filter, Eye, BarChart3 } from 'lucide-react';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { MapPin, Filter, Eye, BarChart3, Loader2, AlertTriangle } from 'lucide-react';
 
 // Dynamic import for Leaflet to avoid SSR issues
 const MapVisualization = dynamic(() => import('@/components/MapVisualization'), {
@@ -23,11 +24,11 @@ const MapVisualization = dynamic(() => import('@/components/MapVisualization'), 
 
 interface MapSample {
   id: string;
-  sampleId: string;
-  projectId: string;
+  sample_id: string;
+  project_id: string;
   projectName: string;
   metal: string;
-  Si: number;
+  si: number;
   latitude: number;
   longitude: number;
   district: string;
@@ -38,31 +39,75 @@ interface MapSample {
 }
 
 export default function VisualizationPage() {
+  const [projects, setProjects] = useState<any[]>([]);
+  const [samples, setSamples] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<string>('all');
   const [selectedRiskLevel, setSelectedRiskLevel] = useState<string>('all');
   const [mapSamples, setMapSamples] = useState<MapSample[]>([]);
 
   useEffect(() => {
-    // Process samples for map display
-    const processedSamples: MapSample[] = samples.map(sample => {
-      const hmpi = calculateHMPI(sample);
-      const riskLevel = getRiskLevel(hmpi);
-      const project = projects.find(p => p.id === sample.projectId);
+    loadData();
+  }, []);
+
+  useEffect(() => {
+    if (projects.length > 0 && samples.length > 0) {
+      processMapSamples();
+    }
+  }, [projects, samples]);
+
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError(null);
       
-      return {
-        ...sample,
-        projectName: project?.name || 'Unknown Project',
-        hmpi,
-        riskLevel
-      };
-    });
+      const [projectsData, samplesData] = await Promise.all([
+        fetchProjects(),
+        fetchSamples()
+      ]);
+      
+      setProjects(projectsData);
+      setSamples(samplesData);
+    } catch (err) {
+      console.error('Error loading data:', err);
+      setError('Failed to load visualization data. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const processMapSamples = () => {
+    const processedSamples: MapSample[] = samples
+      .filter(sample => sample.latitude && sample.longitude) // Only samples with coordinates
+      .map(sample => {
+        const hmpi = calculateHMPI(sample.si || 0, sample.ii || 1, sample.mi || 1);
+        const riskLevel = getRiskLevel(hmpi);
+        const project = projects.find(p => p.project_id === sample.project_id);
+        
+        return {
+          id: sample.id,
+          sample_id: sample.sample_id,
+          project_id: sample.project_id,
+          projectName: project?.name || 'Unknown Project',
+          metal: sample.metal || 'Unknown',
+          si: sample.si || 0,
+          latitude: parseFloat(sample.latitude),
+          longitude: parseFloat(sample.longitude),
+          district: sample.district || 'Unknown',
+          city: sample.city || 'Unknown',
+          date: sample.date || sample.created_at?.split('T')[0] || 'Unknown',
+          hmpi,
+          riskLevel
+        };
+      });
 
     setMapSamples(processedSamples);
-  }, []);
+  };
 
   // Filter samples based on selections
   const filteredSamples = mapSamples.filter(sample => {
-    if (selectedProject !== 'all' && sample.projectId !== selectedProject) return false;
+    if (selectedProject !== 'all' && sample.project_id !== selectedProject) return false;
     if (selectedRiskLevel !== 'all' && sample.riskLevel.level !== selectedRiskLevel) return false;
     return true;
   });
@@ -94,6 +139,28 @@ export default function VisualizationPage() {
     'Very High Risk'
   ];
 
+  if (loading) {
+    return (
+      <div className="p-6 flex items-center justify-center min-h-96">
+        <div className="text-center">
+          <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4" />
+          <p className="text-gray-600">Loading visualization data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-6">
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -123,8 +190,8 @@ export default function VisualizationPage() {
                   <SelectContent>
                     <SelectItem value="all">All Projects</SelectItem>
                     {projects.map(project => (
-                      <SelectItem key={project.id} value={project.id}>
-                        {project.name.split(' - ')[1] || project.name}
+                      <SelectItem key={project.id} value={project.project_id}>
+                        {project.name.length > 30 ? project.name.substring(0, 30) + '...' : project.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -215,7 +282,22 @@ export default function VisualizationPage() {
         </CardHeader>
         <CardContent>
           <div className="h-[600px] rounded-lg overflow-hidden border">
-            <MapVisualization samples={filteredSamples} />
+            {filteredSamples.length > 0 ? (
+              <MapVisualization samples={filteredSamples} />
+            ) : (
+              <div className="h-full flex items-center justify-center bg-gray-50">
+                <div className="text-center">
+                  <MapPin className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">No samples to display</h3>
+                  <p className="text-gray-500">
+                    {selectedProject !== 'all' || selectedRiskLevel !== 'all' 
+                      ? 'Try adjusting your filters to see more results.'
+                      : 'Add samples with coordinates through the Data Entry page.'
+                    }
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -234,7 +316,7 @@ export default function VisualizationPage() {
               {filteredSamples.map((sample) => (
                 <div key={sample.id} className="border rounded-lg p-4 hover:shadow-md transition-shadow">
                   <div className="flex items-center justify-between mb-2">
-                    <h4 className="font-medium">{sample.sampleId}</h4>
+                    <h4 className="font-medium">{sample.sample_id}</h4>
                     <Badge 
                       variant="outline"
                       style={{ 
@@ -247,10 +329,10 @@ export default function VisualizationPage() {
                   </div>
                   
                   <div className="space-y-1 text-sm text-gray-600">
-                    <p><strong>Project:</strong> {sample.projectName.split(' - ')[1]}</p>
+                    <p><strong>Project:</strong> {sample.projectName.length > 25 ? sample.projectName.substring(0, 25) + '...' : sample.projectName}</p>
                     <p><strong>Location:</strong> {sample.district}, {sample.city}</p>
                     <p><strong>Metal:</strong> {sample.metal}</p>
-                    <p><strong>Concentration:</strong> {sample.Si} mg/L</p>
+                    <p><strong>Concentration:</strong> {sample.si} mg/L</p>
                     <p><strong>HMPI:</strong> <span className="font-bold">{sample.hmpi.toFixed(2)}</span></p>
                     <p><strong>Date:</strong> {sample.date}</p>
                   </div>

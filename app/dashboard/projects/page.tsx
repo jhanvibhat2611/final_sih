@@ -1,9 +1,6 @@
 'use client';
-
 import { useState, useEffect } from 'react';
-import { supabase } from '@/lib/supabase';
-import { samples, alerts, calculateHMPI, getRiskLevel } from '@/utils/data';
-
+import { fetchProjects, fetchSamples, fetchAlerts, insertProject, calculateHMPI, getRiskLevel } from '@/utils/supabase-helpers';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +9,8 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { FolderOpen, Plus, MapPin, Calendar, Eye, BarChart3 } from 'lucide-react';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { FolderOpen, Plus, MapPin, Calendar, Eye, BarChart3, Loader2, AlertTriangle } from 'lucide-react';
 
 interface Project {
   id: string;
@@ -28,6 +26,10 @@ interface Project {
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [samples, setSamples] = useState<any[]>([]);
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [newProject, setNewProject] = useState({
     project_id: '',
@@ -39,41 +41,67 @@ export default function ProjectsPage() {
     longitude: '',
   });
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
 
-  // ✅ Fetch projects
   useEffect(() => {
-    const fetchProjects = async () => {
-      const { data, error } = await supabase
-        .from('projects')
-        .select('*')
-        .order('created_at', { ascending: false });
-      if (error) console.error('Error fetching projects:', error.message);
-      else if (data) setProjects(data);
-    };
-    fetchProjects();
+    loadData();
   }, []);
 
-  // ✅ Save new project
-  const handleCreateProject = async () => {
-    const { data, error } = await supabase.from('projects').insert([newProject]).select();
-    if (error) {
-      alert('Failed to create project: ' + error.message);
-      return;
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      const [projectsData, samplesData, alertsData] = await Promise.all([
+        fetchProjects(),
+        fetchSamples(),
+        fetchAlerts()
+      ]);
+      
+      setProjects(projectsData);
+      setSamples(samplesData);
+      setAlerts(alertsData);
+    } catch (err) {
+      console.error('Error loading data:', err);
+      setError('Failed to load projects. Please try again.');
+    } finally {
+      setLoading(false);
     }
-    if (data) setProjects([data[0], ...projects]);
-    setNewProject({
-      project_id: '',
-      name: '',
-      description: '',
-      district: '',
-      city: '',
-      latitude: '',
-      longitude: '',
-    });
-    setIsDialogOpen(false);
   };
 
-  // ✅ Filter
+  const handleCreateProject = async () => {
+    if (!newProject.name || !newProject.project_id || !newProject.district || !newProject.city) {
+      setError('Please fill in all required fields.');
+      return;
+    }
+
+    try {
+      setCreating(true);
+      setError(null);
+      
+      const createdProject = await insertProject(newProject);
+      
+      if (createdProject) {
+        setProjects([createdProject, ...projects]);
+        setNewProject({
+          project_id: '',
+          name: '',
+          description: '',
+          district: '',
+          city: '',
+          latitude: '',
+          longitude: '',
+        });
+        setIsDialogOpen(false);
+      }
+    } catch (err) {
+      console.error('Error creating project:', err);
+      setError('Failed to create project. Please try again.');
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const filteredProjects = projects.filter((project) =>
     project.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     project.city.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -81,17 +109,27 @@ export default function ProjectsPage() {
   );
 
   const getProjectStats = (projectId: string) => {
-    const projectSamples = samples.filter((s) => s.projectId === projectId);
-    const projectAlerts = alerts.filter((a) => a.projectId === projectId && !a.acknowledged);
-    const avgHMPI =
-      projectSamples.length > 0
-        ? projectSamples.reduce((sum, s) => sum + calculateHMPI(s), 0) / projectSamples.length
-        : 0;
-    const riskLevels = projectSamples.map((s) => getRiskLevel(calculateHMPI(s)).level);
+    const projectSamples = samples.filter((s) => s.project_id === projectId);
+    const projectAlerts = alerts.filter((a) => a.project_id === projectId && !a.acknowledged);
+    const avgHMPI = projectSamples.length > 0
+      ? projectSamples.reduce((sum, s) => sum + calculateHMPI(s.si || 0, s.ii || 1, s.mi || 1), 0) / projectSamples.length
+      : 0;
+    const riskLevels = projectSamples.map((s) => getRiskLevel(calculateHMPI(s.si || 0, s.ii || 1, s.mi || 1)).level);
     const highRiskCount = riskLevels.filter((level) => level === 'High Risk' || level === 'Very High Risk').length;
 
     return { sampleCount: projectSamples.length, alertCount: projectAlerts.length, avgHMPI, highRiskCount };
   };
+
+  if (loading) {
+    return (
+      <div className="p-6 flex items-center justify-center min-h-96">
+        <div className="text-center">
+          <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4" />
+          <p className="text-gray-600">Loading projects...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">
@@ -116,9 +154,8 @@ export default function ProjectsPage() {
             </DialogHeader>
 
             <div className="space-y-4">
-              {/* Project Name */}
               <div className="space-y-2">
-                <Label htmlFor="project-name">Project Name</Label>
+                <Label htmlFor="project-name">Project Name *</Label>
                 <Input
                   id="project-name"
                   placeholder="e.g., Krishna River Study - Vijayawada"
@@ -127,18 +164,16 @@ export default function ProjectsPage() {
                 />
               </div>
 
-              {/* Project ID */}
               <div className="space-y-2">
-                <Label htmlFor="project-id">Project ID</Label>
+                <Label htmlFor="project-id">Project ID *</Label>
                 <Input
                   id="project-id"
-                  placeholder="Unique project identifier"
+                  placeholder="Unique project identifier (e.g., p6)"
                   value={newProject.project_id}
                   onChange={(e) => setNewProject((prev) => ({ ...prev, project_id: e.target.value }))}
                 />
               </div>
 
-              {/* Description */}
               <div className="space-y-2">
                 <Label htmlFor="project-description">Description</Label>
                 <Textarea
@@ -149,10 +184,9 @@ export default function ProjectsPage() {
                 />
               </div>
 
-              {/* District + City */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="district">District</Label>
+                  <Label htmlFor="district">District *</Label>
                   <Input
                     id="district"
                     placeholder="District name"
@@ -161,7 +195,7 @@ export default function ProjectsPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="city">City/State</Label>
+                  <Label htmlFor="city">City/State *</Label>
                   <Input
                     id="city"
                     placeholder="City or State"
@@ -171,7 +205,6 @@ export default function ProjectsPage() {
                 </div>
               </div>
 
-              {/* Latitude + Longitude */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="latitude">Latitude</Label>
@@ -193,13 +226,29 @@ export default function ProjectsPage() {
                 </div>
               </div>
 
+              {error && (
+                <Alert variant="destructive">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+
               <div className="flex justify-end gap-2 pt-4">
-                <Button variant="outline" onClick={() => setIsDialogOpen(false)}>Cancel</Button>
+                <Button variant="outline" onClick={() => setIsDialogOpen(false)} disabled={creating}>
+                  Cancel
+                </Button>
                 <Button
                   onClick={handleCreateProject}
-                  disabled={!newProject.name || !newProject.project_id || !newProject.district || !newProject.city}
+                  disabled={creating || !newProject.name || !newProject.project_id || !newProject.district || !newProject.city}
                 >
-                  Create Project
+                  {creating ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    'Create Project'
+                  )}
                 </Button>
               </div>
             </div>
@@ -228,10 +277,17 @@ export default function ProjectsPage() {
         </Select>
       </div>
 
+      {error && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
       {/* Project Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {filteredProjects.map((project) => {
-          const stats = getProjectStats(project.id);
+          const stats = getProjectStats(project.project_id);
 
           return (
             <Card key={project.id} className="hover:shadow-lg transition-shadow">
@@ -244,14 +300,20 @@ export default function ProjectsPage() {
                       {project.district}, {project.city}
                     </CardDescription>
                     <p className="text-xs text-gray-500 mt-1">Project ID: {project.project_id}</p>
-                    <p className="text-xs text-gray-500">Lat: {project.latitude}, Lng: {project.longitude}</p>
+                    {project.latitude && project.longitude && (
+                      <p className="text-xs text-gray-500">
+                        Lat: {project.latitude}, Lng: {project.longitude}
+                      </p>
+                    )}
                   </div>
                   <FolderOpen className="h-5 w-5 text-blue-600 flex-shrink-0 ml-2" />
                 </div>
               </CardHeader>
 
               <CardContent className="space-y-4">
-                <p className="text-sm text-gray-600 line-clamp-2">{project.description}</p>
+                {project.description && (
+                  <p className="text-sm text-gray-600 line-clamp-2">{project.description}</p>
+                )}
 
                 {/* Project Stats */}
                 <div className="grid grid-cols-2 gap-4 p-3 bg-gray-50 rounded-lg">
@@ -307,10 +369,16 @@ export default function ProjectsPage() {
           );
         })}
       </div>
+
+      {filteredProjects.length === 0 && !loading && (
+        <div className="text-center py-12">
+          <FolderOpen className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+          <h3 className="text-lg font-medium text-gray-900 mb-2">No projects found</h3>
+          <p className="text-gray-500">
+            {searchTerm ? 'Try adjusting your search terms.' : 'Create your first project to get started.'}
+          </p>
+        </div>
+      )}
     </div>
   );
 }
-
-
-
-
